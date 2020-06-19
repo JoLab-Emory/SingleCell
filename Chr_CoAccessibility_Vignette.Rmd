@@ -1,0 +1,155 @@
+---
+title: "Chr Co-Accessibility Vignette"
+author: "Hope Mumme"
+# date: "6/8/2020"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+## Chromosome Co-Accessibility Analysis using Cicero
+We use the package cicero by the Trapnell Lab to analyze our scATAC-seq data.
+Link to package: https://cole-trapnell-lab.github.io/cicero-release/docs_m3/
+
+```{r Load Required Packages and SeuratObject, message=FALSE, warning=FALSE, include=FALSE}
+library(cicero)
+library(Seurat)
+
+load("co_access_data.RData")
+```
+
+
+## Convert Seurat Object into Monocle3 cell data set
+In order to do chr co-accessibility analysis we must convert into a monocle3 cell data set
+
+```{R convert to cds, echo=TRUE, warning=FALSE}
+# load in Seurat Object from Seurat Analysis
+expression_matrix <- SeuratObject@assays$ATAC@counts
+cells <- as.data.frame(SeuratObject@meta.data[,1:4])
+chrs <- SeuratObject@assays$ATAC@counts@Dimnames[[1]]
+genes <- SeuratObject@assays$RNA@counts@Dimnames[[1]]
+gene_df <- data.frame(ids = genes, row.names = genes)
+colnames(gene_df) <- "gene_short_name"
+chr_df <- data.frame(ids = chrs, row.names = chrs)
+
+# Make the new CDS object
+aggr_cds <- new_cell_data_set(expression_matrix,
+                         cell_metadata = cells,
+                         gene_metadata = chr_df)
+
+# add in UMAP info from SeuratObject
+recreate.partition <- c(rep(1, length(aggr_cds@colData@rownames)))
+names(recreate.partition) <- aggr_cds@colData@rownames
+recreate.partition <- as.factor(recreate.partition)
+
+aggr_cds@clusters@listData[["UMAP"]][["partitions"]] <- recreate.partition
+
+cluster.res <- 0.7
+nPC <- 15
+list_cluster <- SeuratObject@meta.data[["seurat_clusters"]]
+names(list_cluster) <- SeuratObject@assays[["RNA"]]@data@Dimnames[[2]]
+
+aggr_cds@clusters@listData[["UMAP"]][["clusters"]] <- list_cluster
+aggr_cds@clusters@listData[["UMAP"]][["louvain_res"]] <- "NA"
+
+aggr_cds@int_colData@listData[["reducedDims"]][["UMAP"]] <- SeuratObject@reductions[["umap"]]@cell.embeddings
+
+aggr_cds@preprocess_aux$gene_loadings <- SeuratObject@reductions[["umap"]]@feature.loadings
+
+colData(aggr_cds)$assigned_cell_type <- as.character(clusters(aggr_cds))
+colData(aggr_cds)$assigned_cell_type = dplyr::recode(colData(aggr_cds)$assigned_cell_type,
+                                                "0"="EC2",
+                                                "1"="EC5",
+                                                "2"="Mon",
+                                                "3"="EC1",
+                                                "4"="EC8",
+                                                "5"="Fibro",
+                                                "6"="EC3",
+                                                "7"="EC4",
+                                                "8"="SMCs",
+                                                "9"="EC6",
+                                                "10"="T",
+                                                "11"="DC",
+                                                "12"="EC7",
+                                                "13"="ND1",
+                                                "14"="ND2",
+                                                "15"="ND3")
+
+# add in bp1 and bp2 columns to fData (needed for downstream analysis)
+fData(aggr_cds) <- f_chr
+
+# the fData of the cds should like the following
+print(head(fData(aggr_cds)))
+```
+
+### Make sure that the fData of your cds has a column for bp1 , bp2 , and chr id labeled like above.
+
+## Plot connections for aggregate dataset
+We use the function run_cicero() to make the connections and then plot a specific connection for the aggregate dataset
+
+``` {r Plot connections for aggregate dataset}
+# Load in reference genome
+data('mouse.mm9.genome')
+genome <- mouse.mm9.genome
+
+# Make connections
+cons_aggr <- run_cicero(aggr_cds,genome)
+
+# Plot connections
+plot_connections(cons_aggr, 'chr8', 84169125,84195067,
+                 gene_model = gene_anno, 
+                 coaccess_cutoff = 0,
+                 connection_width = .5,
+                 include_axis_track = T,
+                 collapseTranscripts = "longest", 
+                 connection_ymax = 1) 
+```
+
+## Analyzing cell subtype connections
+We make subsets of the aggregate cell_data_set for each endothelial cell subtype in order to analyze the differences in co-accessibility
+
+```{R Make ECs, echo=TRUE, warning=FALSE}
+# make_sub function to create each ec subtype cds
+make_sub <- function(ec_type,aggr_cds,expression_matrix,cells,chr_df) {
+  inds <- which(colData(aggr_cds)$assigned_cell_type == ec_type)
+  
+  expression_matrix_sub <- expression_matrix[,inds]
+  cells_sub <- cells[inds,]
+
+  cds_sub <- new_cell_data_set(expression_matrix_sub,
+                          cell_metadata = cells_sub,
+                          gene_metadata = chr_df)
+  fData(cds_sub) <- fData(aggr_cds)
+  
+  return(cds_sub)
+}
+
+# make ec subtype (repeat for each subtype)
+cds_ec1 <- make_sub("EC1",aggr_cds,expression_matrix,cells,chr_df)
+conns_1 <- run_cicero(cds_ec1,genome)
+
+cds_ec8 <- make_sub("EC8",aggr_cds,expression_matrix,cells,chr_df)
+conns_8 <- run_cicero(cds_ec8,genome)
+
+# conns_i should look like the following
+head(conns_1)
+```
+
+## Plot connections for ec subtype
+
+``` {r Compare connections between EC subtypes}
+plot_connections(conns_1, 'chr7',43771035,43795410, 
+                 gene_model = gene_anno, 
+                 coaccess_cutoff = 0,
+                 connection_width = .5,
+                 comparison_track = conns_8,
+                 comparison_coaccess_cutoff = 0,
+                 comparison_connection_width = .5,
+                 include_axis_track = T,
+                 collapseTranscripts = "longest", 
+                 connection_ymax = 1,
+                 comparison_ymax = 1) 
+
+```

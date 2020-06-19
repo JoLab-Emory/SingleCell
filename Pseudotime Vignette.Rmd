@@ -1,0 +1,62 @@
+---
+title: "Pseudotime Vignette"
+author: "Hope Mumme"
+date: "6/16/2020"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+## Load Required Packages and Workspace
+### Make sure that Monocle3 is detached
+```{r load packages, echo=TRUE, message=FALSE, warning=FALSE}
+library(monocle)
+library(Seurat)
+
+load("~/Desktop/vignettes/mon.RData")
+```
+
+## Make the Monocle CellDataSet from the Seurat Object
+```{r make Monocle CDS from Seurat Object, message=FALSE, warning=FALSE, include=FALSE}
+mat <- as(as.matrix(SeuratObject@assays[["RNA"]]@data),'sparseMatrix')
+md <- new('AnnotatedDataFrame', data = SeuratObject@meta.data)
+fd <- new('AnnotatedDataFrame', data = data.frame(gene_short_name = row.names(mat),row.names = row.names(mat)))
+cds <- newCellDataSet(mat,phenoData = md,featureData = fd,lowerDetectionLimit = 0.5,expressionFamily = negbinomial.size())
+```
+
+## Import cell type and UMAP information from SeuratObject
+```{r import info, echo=TRUE}
+# import cell type and UMAP information from Seurat Object
+seurat_cl <- SeuratObject@active.ident
+
+cds@reducedDimW=t(SeuratObject@reductions$pca@cell.embeddings)
+cds@reducedDimS=t(SeuratObject@reductions$umap@cell.embeddings)
+cds@reducedDimK=t(SeuratObject@reductions$umap@cell.embeddings)
+
+phenoData(cds)$Cell_Type <- seurat_cl
+cds@dim_reduce_type = "ICA"
+
+cds_u <- suppressWarnings(estimateSizeFactors(cds))
+cds_u <- suppressWarnings(estimateDispersions(cds_u))
+phenoData(cds_u)$Cell_Type <- seurat_cl
+
+cds_u <- reduceDimension(cds_u, max_components = 2, num_dim = 6,
+                        reduction_method = 'tSNE', verbose = T)
+
+cds_u <- clusterCells(cds_u, num_clusters = 16)
+
+expressed_genes <- row.names(featureData(cds_u))
+
+cds_rd <- reduceDimension(cds_u, max_components = 2,
+                            method = 'DDRTree')
+
+cds_rd <- orderCells(cds_rd)
+```
+
+## Plot Pseudotime Trajectory
+```{r plot pseudotime, echo=TRUE}
+plot_cell_trajectory(cds_rd, color_by = "Cell_Type")
+```
+
