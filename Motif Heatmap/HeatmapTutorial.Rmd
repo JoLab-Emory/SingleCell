@@ -1,0 +1,179 @@
+---
+title: "Motif Heatmap"
+output: html_notebook
+---
+
+This tutorial can be used to produce the motif heatmaps. In this tutorial, the current Seurat object has many clusters, all of which are labeled with their cell identity. The objective of this tutorial is to produce two heatmaps, one of the top 15 motifs of each EC cluster and one with the top 20 motifs.
+
+
+### Set Values for Project
+
+```{r} 
+object.name = "object.rds"
+cell.type = "EC"
+```  
+
+### Necessary Packages
+
+```{r} 
+library(Seurat)
+library(Signac)
+library(viridis)
+library(ggplot2)
+```
+
+### Useful Functions
+
+```{r} 
+# Funtion to simplify isolating the EC clusters
+GetGroups <-function(
+  object,
+  group.by,
+  idents
+) {
+  if (is.null(x = group.by)) {
+    obj.groups <- Idents(object = object)
+  } else {
+    obj.md <- object[[group.by]]
+    obj.groups <- obj.md[, 1]
+    names(obj.groups) <- rownames(x = obj.md)
+  }
+  if (!is.null(idents)) {
+    obj.groups <- obj.groups[obj.groups %in% idents]
+  }
+  return(obj.groups)
+}
+
+
+# Function for producing heatmap
+ProduceHeatmap <-function(
+  object,
+  number.motifs = 15,
+  cell.id,
+  fold.enrichment = 2.8
+) {
+  # Objects which will be used later
+  matrix_list <- 1
+  top_genes = c()
+  
+  # For each EC cluster...
+  for(idx in c(1:length(cell.id))) {
+    message(paste0('- Getting fold values for ', cell.id[idx]))
+
+    # Find the motif peaks relative to the other EC clusters
+    da_peaks <- FindMarkers(
+      object = object,
+      ident.1 = cell.id[idx],
+      only.pos = TRUE,
+      test.use = 'LR',
+      latent.vars = 'nCount_peaks'
+    )
+    
+    # Test the differentially accessible peaks for overrepresented motifs
+    enriched.motifs <- FindMotifs(
+      object = object,
+      features = rownames(da_peaks)
+    )
+    
+    # Sort by P-Value and then motif FC
+    enriched.motifs <- enriched.motifs[ -enriched.motifs[, 6], ]
+    
+    # Edit dataframe
+    row.names(enriched.motifs) <- enriched.motifs$motif.name
+    
+    # Keep top n motifs
+    top_genes <- c(top_genes, row.names(head(enriched.motifs, n = number.motifs)))
+    enriched.motifs <- enriched.motifs[, c(6, 8)]
+    names(enriched.motifs)[1] <- cell.id[idx]
+    
+    # Merge all dataframes together
+    if(matrix_list == 1){
+      matrix_list <- enriched.motifs
+    } else {
+      matrix_list <- merge(matrix_list, enriched.motifs, all = TRUE)
+      matrix_list[is.na(matrix_list)] <- 0
+    }
+  }
+  
+  # Remove repeating motifs
+  top_genes_unique <- unique(top_genes)
+  
+  # Only keep significant motifs
+  matrix_list_unique <- matrix_list[matrix_list$motif.name %in% top_genes_unique,]
+  
+  # Make motif names the row names to make the matrix numeric
+  row.names(matrix_list_unique) <- matrix_list_unique$motif.name
+  matrix_list_unique <- matrix_list_unique[, -c(1)]
+
+  # Prepare matrix to make heatmap 
+  matrix_list_unique$current <- paste0('EC', 1)
+  new_mat <- data.frame(
+    rownames(matrix_list_unique), 
+    matrix_list_unique$current, 
+    matrix_list_unique$EC1
+  )
+  matrix_list_unique <- matrix_list_unique[, -c(1)]
+  colnames(new_mat) <- c('X','Y','Z')
+  for (i in c(2:8)) {
+    matrix_list_unique$current <- paste0('EC', i)
+    temp <- data.frame(rownames(matrix_list_unique), matrix_list_unique$current, matrix_list_unique[,1])
+    colnames(temp) <- c('X','Y','Z')
+    new_mat <- rbind(new_mat, temp)
+    matrix_list_unique <- matrix_list_unique[, -c(1)]
+  }
+  colnames(new_mat) <- c('X','Y','FoldEnrichment')
+  new_mat$X <- factor(new_mat$X,levels = rev(top_genes_unique))
+
+  # Make heatmap
+  new_plot <- ggplot(new_mat, aes(Y, X, fill=FoldEnrichment)) + 
+    geom_tile() +
+    scale_fill_viridis(rescaler = function(x, to = c(0, 1), from = NULL) {
+      ifelse(x<fold.enrichment, scales::rescale(
+        x, to = to, from = c(min(x, na.rm = TRUE), fold.enrichment)
+      ), 1)
+    }) +
+    theme_bw() +
+    ggtitle(print0("Top ", number.motifs, "Motif Expression per Cluster")) +
+    xlab("Cluster Name") +
+    ylab("Motif")
+
+  return(new_plot)  
+}
+```
+
+### Prepare Seurat Object
+
+```{r} 
+# Load the object and rename groups
+object <- readRDS(object.name)
+object$cell_id <- object@active.ident
+group.by <- "cell_id"
+obj.groups <- GetGroups(
+  object = object,
+  group.by = group.by,
+  idents = NULL
+)
+
+# Remove non-EC clusters 
+obj.groups.levels <- levels(obj.groups)
+obj.groups.levels.EC <- obj.groups.levels[grepl(cell.type, obj.groups.levels)]
+object <- subset(object, idents = obj.groups.levels.EC)
+```
+
+### Produce Heatmaps
+
+```{r}
+plotA <- ProduceHeatmap(
+  object = object,
+  numberOfMotifs = 15,
+  cell.id = obj.groups.levels.EC,
+  fold.enrichment = 2.8
+)
+
+plotB <- ProduceHeatmap2(
+  object = object,
+  numberOfMotifs = 25,
+  cell.id = obj.groups.levels.EC,
+  fold.enrichment = 2.8
+)
+```
