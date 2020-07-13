@@ -1,0 +1,178 @@
+
+install.packages('Seurat')
+install.packages("devtools")
+devtools::install_github("timoast/signac")
+
+
+library(Seurat)
+library(ggplot2)
+
+#SAFE AND READ RDS FILES
+saveRDS(pbmc, file = "Z:/Signac/pbmc_scRNseq.rds")
+
+
+#Upload scRNAseq analaysis previously done
+
+pbmc <- readRDS('Z:/Signac/pbmc_scRNseq.rds')
+
+###############################################
+###############################################
+
+#scATACseq PROCESSING
+
+samples <- c("2D-R", "2D-L", "2W-R", "2W-L")
+atacs <- list()
+
+#Load H5 file
+dr.peaks <- Read10X_h5('Z:/scATACseq/Cell_ranger/2D-R/outs/filtered_peak_bc_matrix.h5')
+dl.peaks <- Read10X_h5('Z:/scATACseq/Cell_ranger/2D-L/outs/filtered_peak_bc_matrix.h5')
+wr.peaks <- Read10X_h5('Z:/scATACseq/Cell_ranger/2W-R/outs/filtered_peak_bc_matrix.h5')
+wl.peaks <- Read10X_h5('Z:/scATACseq/Cell_ranger/2W-L/outs/filtered_peak_bc_matrix.h5')
+
+#Create gene activity matrix
+dr.activity.matrix <- CreateGeneActivityMatrix(peak.matrix = dr.peaks, 
+                                               annotation.file = "/Users/aanduez/Desktop/Mus_musculus.GRCm38.99.gtf", 
+                                               seq.levels = c(1:19, "X", "Y"), 
+                                               upstream = 2000, verbose = TRUE)
+dl.activity.matrix <- CreateGeneActivityMatrix(peak.matrix = dl.peaks, 
+                                               annotation.file = "/Users/aanduez/Desktop/Mus_musculus.GRCm38.99.gtf", 
+                                               seq.levels = c(1:19, "X", "Y"), 
+                                               upstream = 2000, verbose = TRUE)
+wr.activity.matrix <- CreateGeneActivityMatrix(peak.matrix = wr.peaks, 
+                                               annotation.file = "/Users/aanduez/Desktop/Mus_musculus.GRCm38.99.gtf", 
+                                               seq.levels = c(1:19, "X", "Y"), 
+                                               upstream = 2000, verbose = TRUE)
+wl.activity.matrix <- CreateGeneActivityMatrix(peak.matrix = wl.peaks, 
+                                               annotation.file = "/Users/aanduez/Desktop/Mus_musculus.GRCm38.99.gtf", 
+                                               seq.levels = c(1:19, "X", "Y"), 
+                                               upstream = 2000, verbose = TRUE)
+
+#Create Seurat object
+dr.atac <- CreateSeuratObject(counts = dr.peaks, assay = "ATAC", project = "10x_ATAC")
+dl.atac <- CreateSeuratObject(counts = dl.peaks, assay = "ATAC", project = "10x_ATAC")
+wr.atac <- CreateSeuratObject(counts = wr.peaks, assay = "ATAC", project = "10x_ATAC")
+wl.atac <- CreateSeuratObject(counts = wl.peaks, assay = "ATAC", project = "10x_ATAC")
+
+#Add activity matrix to object
+dr.atac[["ACTIVITY"]] <- CreateAssayObject(counts = dr.activity.matrix)
+dl.atac[["ACTIVITY"]] <- CreateAssayObject(counts = dl.activity.matrix)
+wr.atac[["ACTIVITY"]] <- CreateAssayObject(counts = wr.activity.matrix)
+wl.atac[["ACTIVITY"]] <- CreateAssayObject(counts = wl.activity.matrix)
+
+#scATACseq metadata
+dr.meta <- read.table("Z:/scATACseq/Cell_ranger/2D-R/outs/singlecell.csv", sep = ",", header = TRUE, row.names = 1, 
+                      stringsAsFactors = FALSE)
+dl.meta <- read.table("Z:/scATACseq/Cell_ranger/2D-L/outs/singlecell.csv", sep = ",", header = TRUE, row.names = 1, 
+                      stringsAsFactors = FALSE)
+wr.meta <- read.table("Z:/scATACseq/Cell_ranger/2W-R/outs/singlecell.csv", sep = ",", header = TRUE, row.names = 1, 
+                      stringsAsFactors = FALSE)
+wl.meta <- read.table("Z:/scATACseq/Cell_ranger/2W-L/outs/singlecell.csv", sep = ",", header = TRUE, row.names = 1, 
+                      stringsAsFactors = FALSE)
+
+dr.meta <- dr.meta[colnames(dr.atac), ]
+dl.meta <- dl.meta[colnames(dl.atac), ]
+wr.meta <- wr.meta[colnames(wr.atac), ]
+wl.meta <- wl.meta[colnames(wl.atac), ]
+
+dr.atac <- AddMetaData(dr.atac, metadata = dr.meta)
+dl.atac <- AddMetaData(dl.atac, metadata = dl.meta)
+wr.atac <- AddMetaData(wr.atac, metadata = wr.meta)
+wl.atac <- AddMetaData(wl.atac, metadata = wl.meta)
+
+dr.atac <- subset(dr.atac, subset = nCount_ATAC > 5000)
+dl.atac <- subset(dl.atac, subset = nCount_ATAC > 5000)
+wr.atac <- subset(wr.atac, subset = nCount_ATAC > 5000)
+wl.atac <- subset(wl.atac, subset = nCount_ATAC > 5000)
+
+dr.atac$tech <- "atac"
+dl.atac$tech <- "atac"
+wr.atac$tech <- "atac"
+wl.atac$tech <- "atac"
+
+dr.atac$orig.ident <- factor(x = dr.atac@meta.data$orig.ident, levels = "2D-R")
+dl.atac$orig.ident <- factor(x = dl.atac@meta.data$orig.ident, levels = "2D-L")
+wr.atac$orig.ident <- factor(x = wr.atac@meta.data$orig.ident, levels = "2W-R")
+wl.atac$orig.ident <- factor(x = wl.atac@meta.data$orig.ident, levels = "2W-L")
+
+dr.atac$active.ident <- factor(x = dr.atac@active.ident, levels = "2D-R")
+dl.atac$active.ident <- factor(x = dl.atac@active.ident, levels = "2D-L")
+wr.atac$active.ident <- factor(x = wr.atac@active.ident, levels = "2W-R")
+wl.atac$active.ident <- factor(x = wl.atac@active.ident, levels = "2W-L")
+
+pbmc.atac <- merge(dr.atac, y = c(dl.atac, wr.atac, wl.atac), 
+                   add.cell.ids = c("2D-R", "2D-L", "2W-R", "2W-L"), project = "atac")
+
+DefaultAssay(pbmc.atac) <- "ACTIVITY"
+
+pbmc.atac <- FindVariableFeatures(pbmc.atac)
+pbmc.atac <- NormalizeData(pbmc.atac)
+pbmc.atac <- ScaleData(pbmc.atac)
+
+DefaultAssay(pbmc.atac) <- "ATAC"
+VariableFeatures(pbmc.atac) <- names(which(Matrix::rowSums(pbmc.atac) > 100))
+pbmc.atac <- RunLSI(pbmc.atac, n = 50, scale.max = NULL)
+pbmc.atac <- RunUMAP(pbmc.atac, reduction = "lsi", dims = 1:50)
+
+#######################################################################
+#######################################################################
+
+pbmc.rna <- pbmc
+
+pbmc.rna$tech <- "rna"
+
+p1 <- DimPlot(pbmc.atac, pt.size = 2.5, reduction = "umap") + NoLegend() + ggtitle("scATAC-seq")
+p2 <- DimPlot(pbmc.rna, pt.size = 2.5, label.size = 7, label = TRUE, repel = TRUE) + NoLegend() + ggtitle("scRNA-seq")
+p3 <- DimPlot(pbmc.rna, pt.size = 2.5) + NoLegend() + ggtitle("scRNA-seq")
+CombinePlots(plots = list(p1, p2))
+CombinePlots(plots = list(p1, p3))
+
+transfer.anchors <- FindTransferAnchors(reference = pbmc.rna, query = pbmc.atac, features = VariableFeatures(object = pbmc.rna), 
+                                        reference.assay = "RNA", query.assay = "ACTIVITY", reduction = "cca")
+
+celltype.predictions <- TransferData(anchorset = transfer.anchors, refdata = pbmc.rna@active.ident, 
+                                     weight.reduction = pbmc.atac[["lsi"]])
+
+pbmc.atac <- AddMetaData(pbmc.atac, metadata = celltype.predictions)
+
+hist(pbmc.atac$prediction.score.max) + ggtitle("Prediction")
+abline(v = 0.4, col = "red") 
+table(pbmc.atac$prediction.score.max > 0.4)
+
+pbmc.atac.filtered <- subset(pbmc.atac, subset = prediction.score.max > 0.4)
+pbmc.atac.filtered$predicted.id <- factor(pbmc.atac.filtered$predicted.id, levels = levels(pbmc.rna))  # to make the colors match
+p1 <- DimPlot(pbmc.atac.filtered, group.by = "predicted.id", pt.size = 2.5, label.size = 7, label = TRUE, repel = TRUE) + ggtitle("scATAC-seq cells") + 
+  NoLegend() + scale_colour_hue(drop = FALSE)
+p2 <- DimPlot(pbmc.rna, pt.size = 2.5, label.size = 7, label = TRUE, repel = TRUE) + ggtitle("scRNA-seq cells") + 
+  NoLegend()
+p3 <- DimPlot(pbmc.atac.filtered, group.by = "predicted.id", pt.size = 2.5, repel = TRUE) + ggtitle("scATAC-seq cells") + 
+  NoLegend() + scale_colour_hue(drop = FALSE)
+p4 <- DimPlot(pbmc.rna, pt.size = 2.5, repel = TRUE) + ggtitle("scRNA-seq cells") + 
+  NoLegend()
+CombinePlots(plots = list(p1, p2))
+CombinePlots(plots = list(p3, p4))
+
+# note that we restrict the imputation to variable genes from scRNA-seq, but could impute the
+# full transcriptome if we wanted to
+genes.use <- VariableFeatures(pbmc.rna)
+refdata <- GetAssayData(pbmc.rna, assay = "RNA", slot = "data")[genes.use, ]
+
+# refdata (input) contains a scRNA-seq expression matrix for the scRNA-seq cells.  imputation
+# (output) will contain an imputed scRNA-seq matrix for each of the ATAC cells
+imputation <- TransferData(anchorset = transfer.anchors, refdata = refdata, weight.reduction = pbmc.atac[["lsi"]])
+
+# this line adds the imputed data matrix to the pbmc.atac object
+pbmc.atac[["RNA"]] <- imputation
+coembed <- merge(x = pbmc.rna, y = pbmc.atac)
+
+# Finally, we run PCA and UMAP on this combined object, to visualize the co-embedding of both
+# datasets
+coembed <- ScaleData(coembed, features = genes.use, do.scale = FALSE)
+coembed <- RunPCA(coembed, features = genes.use, verbose = FALSE)
+coembed <- RunUMAP(coembed, dims = 1:30)
+coembed$celltype <- ifelse(!is.na(coembed$active.ident), coembed$active.ident, coembed$predicted.id)
+
+p5 <- DimPlot(coembed, group.by = "tech", pt.size = 2.5)
+p6 <- DimPlot(coembed, group.by = "celltype", pt.size = 2.5, label.size = 7, label = TRUE, repel = TRUE) + NoLegend()
+CombinePlots(list(p5, p6))
+DimPlot(coembed, group.by = "tech", pt.size = 2.5)
+DimPlot(coembed, group.by = "celltype", pt.size = 2.5, label.size = 7, label = TRUE, repel = TRUE) + NoLegend()
