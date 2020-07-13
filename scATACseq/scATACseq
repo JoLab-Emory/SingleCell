@@ -1,0 +1,312 @@
+library(Signac)
+library(Seurat)
+library(GenomeInfoDb)
+library(EnsDb.Mmusculus.v79)
+library(ggplot2)
+set.seed(1234)
+library(GenomicRanges)
+library(patchwork)
+library(magrittr)
+
+# define a convenient function to load all the data and create a Seurat object
+create_obj <- function(dir) {
+  count.path <- list.files(path = dir, pattern = "filtered_peak_bc_matrix.h5", full.names = TRUE)
+  fragment.path <- list.files(path = dir, pattern = "fragments.tsv.gz", full.names = TRUE)[1]
+  counts <- Read10X_h5(count.path)
+  md.path <- list.files(path = dir, pattern = "singlecell.csv", full.names = TRUE)
+  md <- read.table(file = md.path, stringsAsFactors = FALSE, sep = ",", header = TRUE)
+  obj <- CreateSeuratObject(counts = counts, assay = "ATAC", meta.data = md)
+  obj <- SetFragments(obj, file = fragment.path)
+  return(obj)
+}
+
+dr <- create_obj("/home/aanduez/Desktop/scATACseq/Cell_ranger/2D-R/outs/")
+dl <- create_obj("/home/aanduez/Desktop/scATACseq/Cell_ranger/2D-L/outs/")
+wr <- create_obj("/home/aanduez/Desktop/scATACseq/Cell_ranger/2W-R/outs/")
+wl <- create_obj("/home/aanduez/Desktop/scATACseq/Cell_ranger/2W-L/outs/")
+
+#Creating a common peak set
+
+combined.peaks <- UnifyPeaks(object.list = list(dr, dl, wr, wl), mode = "reduce")
+combined.peaks
+
+#Quantify peaks in each dataset
+
+dr.counts <- FeatureMatrix(
+  fragments = GetFragments(dr),
+  features = combined.peaks,
+  sep = c(":", "-"),
+  cells = colnames(dr)
+)
+
+dl.counts <- FeatureMatrix(
+  fragments = GetFragments(dl),
+  features = combined.peaks,
+  sep = c(":", "-"),
+  cells = colnames(dl)
+)
+
+wr.counts <- FeatureMatrix(
+  fragments = GetFragments(wr),
+  features = combined.peaks,
+  sep = c(":", "-"),
+  cells = colnames(wr)
+)
+
+wl.counts <- FeatureMatrix(
+  fragments = GetFragments(wl),
+  features = combined.peaks,
+  sep = c(":", "-"),
+  cells = colnames(wl)
+)
+
+dr[['peaks']] <- CreateAssayObject(counts = dr.counts)
+dl[['peaks']] <- CreateAssayObject(counts = dl.counts)
+wr[['peaks']] <- CreateAssayObject(counts = wr.counts)
+wl[['peaks']] <- CreateAssayObject(counts = wl.counts)
+
+#MERGE OBJECTS
+# add information to identify dataset of origin
+dr$dataset <- '2D-R'
+dl$dataset <- '2D-L'
+wr$dataset <- '2W-R'
+wl$dataset <- '2W-L'
+
+# merge all datasets, adding a cell ID to make sure cell names are unique
+combined <- merge(x = dr, y = list(dl, wr, wl), add.cell.ids = c("2D-R", "2D-L", "2W-R", "2W-L"))
+
+# make sure to change to the assay containing common peaks
+DefaultAssay(combined) <- "peaks"
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 20)
+combined <- RunSVD(
+  combined,
+  reduction.key = 'LSI_',
+  reduction.name = 'lsi', 
+  irlba.work = 400
+)
+combined <- RunUMAP(combined, dims = 2:30, reduction = 'lsi')
+
+DimPlot(combined, group.by = 'dataset', pt.size = 0.1)
+
+#ADD FRAGMENTS
+fragment.path <- '/home/aanduez/Desktop/Fragments/fragments.tsv.gz'
+
+combined <- SetFragments(
+  object = combined,
+  file = fragment.path
+)
+
+saveRDS(combined, file = "/home/aanduez/Desktop/scATACseq.merged1.rds")
+
+combined <- readRDS('/home/aanduez/Desktop/Signac/scATACseq.merged1.rds')
+
+#################################################################
+
+#Normalization and linear dimensional reduction
+
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 'q0')
+combined <- RunSVD(
+  object = combined,
+  assay = 'peaks',
+  reduction.key = 'LSI_',
+  reduction.name = 'lsi',
+  irlba.work = 500
+)
+
+#Non linear dimension reduction
+
+combined <- RunUMAP(
+  object = combined,
+  reduction = 'lsi',
+  dims = 2:30
+)
+
+combined <- FindNeighbors(
+  object = combined,
+  reduction = 'lsi',
+  dims = 2:30
+)
+
+combined <- FindClusters(
+  object = combined,
+  algorithm = 3,
+  resolution = 0.38,
+  verbose = FALSE
+)
+
+DimPlot(object = combined, label = TRUE)
+DimPlot(object = combined, label = TRUE, split.by = "dataset", ncol = 2)
+
+
+#################################################################
+
+##Create a gene activity matrix
+
+#extract gene coordinates from Ensembl, and ensure name formatting is consistent with  Seurat object 
+gene.coords <- genes(EnsDb.Mmusculus.v79, filter = ~ gene_biotype == "protein_coding")
+seqlevelsStyle(gene.coords) <- 'UCSC'
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Extend(x = gene.coords, upstream = 2000, downstream = 0)
+
+# build a gene by cell matrix
+gene.activities <- FeatureMatrix(
+  fragments = fragment.path,
+  features = genebodyandpromoter.coords,
+  cells = colnames(combined),
+  chunk = 10
+)
+
+saveRDS(gene.activities, file = "/home/aanduez/Desktop/gene.activities.rds")
+gene.activities <- readRDS('/home/aanduez/Desktop/Signac/gene.activities.rds')
+
+table(combined$dataset, combined@active.ident)
+saveRDS(combined, file = "/home/aanduez/Desktop/scATACseq.merged.preRNA3(17clusters).rds")
+
+combined <- readRDS('/home/aanduez/Desktop/scATACseq.merged.preRNA3(17clusters).rds')
+
+#################################################################
+
+#Integrating with scRNA-seq data
+
+# Load the pre-processed scRNA-seq data
+allen_rna <- readRDS("/home/aanduez/Desktop/Signac/pbmc_scRNseq.rds")
+allen_rna <- FindVariableFeatures(
+  object = allen_rna,
+  nfeatures = 5000
+)
+
+transfer.anchors <- FindTransferAnchors(
+  reference = allen_rna,
+  query = combined,
+  reduction = 'cca',
+  dims = 1:40
+)
+
+predicted.labels <- TransferData(
+  anchorset = transfer.anchors,
+  refdata = allen_rna@active.ident,
+  weight.reduction = combined[['lsi']],
+  dims = 1:40
+)
+
+combined <- AddMetaData(object = combined, metadata = predicted.labels)
+
+plot1 <- DimPlot(allen_rna, label = TRUE, repel = TRUE) + NoLegend() + ggtitle('scRNA-seq')
+plot2 <- DimPlot(combined, group.by = 'predicted.id', label = TRUE, repel = TRUE) + NoLegend() + ggtitle('scATAC-seq')
+CombinePlots(list(plot1,plot2), ncol = 2)
+
+#Crear factors to have levels in orig.ident
+my_levels <- c("2D-R", "2D-L", "2W-R", "2W-L")
+combined@meta.data$dataset <- factor(x = combined@meta.data$dataset, levels = my_levels)
+
+DimPlot(combined, pt.size = 3, label = TRUE, label.size = 6)
+
+DimPlot(combined, pt.size = 2.5, label = TRUE, label.size = 5, split.by = "dataset", ncol = 2) +NoLegend()
+
+table(combined$dataset, combined@active.ident)
+VlnPlot(combined, features = c("Cdh5", "Pecam1", "Icam2", "Cldn5"), ncol = 2)
+VlnPlot(combined, features = c("Nos3", "Klk10", "Klf2", "Klf4"), ncol = 2)
+VlnPlot(combined, features = c("Cnn1", "Speg", "Myh9", "Myh11"), ncol = 2)
+VlnPlot(combined, features = c("Medag", "Dcn", "Tcf21", "Pdpn"), ncol = 2)
+VlnPlot(combined, features = c("Ccr6", "Ccr7", "Mmp28", "Flt3"), ncol = 2)
+VlnPlot(combined, features = c("C1qa", "C1qb", "C1qc", "C5ar1"), ncol = 2)
+VlnPlot(combined, features = c("Itk", "Cd3e", "Cd3d", "Cd3g"), ncol = 2)
+
+saveRDS(combined, file = "/home/aanduez/Desktop/Signac/scATACseq.merged.afterRNA2(15C).rds")
+
+combined <- readRDS('/home/aanduez/Desktop/Signac/scATACseq.merged.afterRNA2(15C).rds')
+
+#################################################################
+#################################################################
+
+
+combined <- RenameIdents(
+  object = combined,
+  '0' = 'EC2',
+  '1' = 'EC5',
+  '2' = 'Mon',
+  '3' = 'EC1',
+  '4' = 'EC8',
+  '5' = 'Fibro',
+  '6' = 'EC3',
+  '7' = 'EC4',
+  '8' = 'SMCs', 
+  '9' = 'EC6',
+  '10' = 'T',
+  '11' = 'DC',
+  '12' = 'EC7',
+  '13' = 'ND1',
+  '14' = 'ND2', 
+  '15' = 'ND3'
+)
+
+#Crear factors to have levels in orig.ident
+my_levels <- c("EC1", "EC2", "EC3", "EC4", "EC5", "EC6", "EC7", "EC8", "SMCs", "Fibro", "Mon", "DC", "T", "ND1", "ND2", "ND3")
+combined@active.ident <- factor(x = combined@active.ident, levels = my_levels)
+
+VlnPlot(combined, features = "Ccl2", idents = c("EC1", "EC2", "EC3", "EC4", "EC6", "EC7", "EC8"))
+
+
+colors <- c("#E6194B", "#04FA1C", "#481930", "#29FFFF", "#B76FFF", "#D7026A", "#FF9999", "#FFA500", "#000073", "#F032E6", "#FFE011", "#CC7000", "#7F7F7F", "#3D5409", "#3D5409", "#3D5409")
+DimPlot(combined, reduction = "umap", pt.size = 2.5, label = FALSE) 
+DimPlot(combined, reduction = "umap", pt.size = 2.5, label = FALSE, split.by = 'dataset', ncol = 2) + scale_color_manual(values = colors) + NoLegend() + theme(axis.text=element_text(size=12), axis.title=element_text(size=20,face="bold"))
+
+
+saveRDS(combined, file = "/home/aanduez/Desktop/scATACseq.preDAA(C15).rds")
+
+combined <- readRDS('/home/aanduez/Desktop/Signac/R object FINAL/scATACseq.afterDAA(C15).rds')
+
+#################################################################
+#################################################################
+
+#switch back to working with peaks instead of gene activities
+DefaultAssay(combined) <- 'peaks'
+
+da_peaks <- FindMarkers(
+  object = combined,
+  ident.1 = c("EC2"), 
+  ident.2 = c("EC8"),
+  min.pct = 0.4,
+  test.use = 'LR'
+)
+
+head(da_peaks)
+da <- rownames(da_peaks)
+da <- ClosestFeature(regions = da, annotation = EnsDb.Mmusculus.v79, sep = c(':', '-'))
+head(da)
+write.csv(da, "daa.EC2 VS EC8.csv")
+
+
+# saveRDS(combined, file = "/home/aanduez/Desktop/scATACseq.afterDAA(C15).rds")
+
+combined <- readRDS("/home/aanduez/Desktop/Signac/R object FINAL/scATACseq.afterDAA(C15).rds")
+
+ec <- subset(combined, idents = c("EC1", "EC2", "EC3", "EC4", "EC5", "EC6", "EC7", "EC8"))
+
+region3 <- "chr13:56589813-56669131"
+region1 <- rownames(da_peaks)[1]
+region2 <- GRangesToString(subset(gene.coords, symbol== "Slc25a39"))
+
+
+p1 <- CoveragePlot(
+  object = combined,
+  region = region3,
+  sep = c(":", "-"),
+  annotation = EnsDb.Mmusculus.v79,
+  extend.upstream =10,
+  extend.downstream = 10,
+  idents = c("EC2", "EC8"),
+  )
+(p2|p2) / (p1)
+
+CoveragePlot(
+  object = combined,
+  region = region2,
+  sep = c(":", "-"),
+  annotation = EnsDb.Mmusculus.v79,
+  extend.upstream = 20000,
+  extend.downstream = 20000,
+  idents = c("EC1", "EC2", "EC8"),
+)
